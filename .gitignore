@@ -1,0 +1,75 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dylib
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+*.whl
+MANIFEST
+
+# PyInstaller
+*.spec
+build/
+dist/
+*.exe
+*.pkg
+*.app
+
+# Environments
+.env
+venv/
+env/
+ENV/
+.venv/
+
+# Logs and Databases
+*.log
+*.sql
+*.sqlite
+*.db
+*.bak
+
+# IDE / Editor Specific
+.idea/
+*.iml
+.vscode/
+.project
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS Specific
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*~
+\#*\#
+*.tmp
+*.temp
+
+# User Specific
+user_settings.json
+secrets.json
+
+# Data Files
+data/
