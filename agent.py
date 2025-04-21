@@ -2,66 +2,67 @@ import datetime
 from zoneinfo import ZoneInfo
 from google.adk.agents import Agent
 
-def get_weather(city: str) -> dict:
-    """Retrieves the current weather report for a specified city.
+import requests
+import json
+
+def delete_vm_instance(project_id: str, instance_id: str, zone: str, service_url: str):
+    """Deletes a VM instance using the /delete_vms endpoint.
 
     Args:
-        city (str): The name of the city for which to retrieve the weather report.
+        project_id: The Google Cloud project ID.
+        instance_id: The ID of the instance to delete.
+        zone: The zone where the instance is located.
+        service_url: The URL of the Cloud Run service.
 
     Returns:
-        dict: status and result or error msg.
+        The JSON response from the API, or None if an error occurs.
     """
-    if city.lower() == "new york":
-        return {
-            "status": "success",
-            "report": (
-                "The weather in New York is sunny with a temperature of 25 degrees"
-                " Celsius (41 degrees Fahrenheit)."
-            ),
-        }
-    else:
-        return {
-            "status": "error",
-            "error_message": f"Weather information for '{city}' is not available.",
-        }
+    headers = {'Content-Type': 'application/json'}
+    data = {'instance_id': instance_id, 'project_id': project_id, 'zone': zone}
+    url = f"{service_url}/delete_vms"
+
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(data))
+        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error deleting instance: {e}")
+        return None
 
 
-def get_current_time(city: str) -> dict:
-    """Returns the current time in a specified city.
+def list_vm_instances(domain: str, project_id: str, zone: str, service_url: str):
+    """Lists VM instances based on domain, project ID, and zone using the /list_vms endpoint.
 
     Args:
-        city (str): The name of the city for which to retrieve the current time.
+        domain: The domain to filter instances by.
+        project_id: The Google Cloud project ID.
+        zone: The zone where the instances are located.
+        service_url: The URL of the Cloud Run service.
 
     Returns:
-        dict: status and result or error msg.
+        The JSON response from the API, or None if an error occurs.
     """
+    headers = {'Content-Type': 'application/json'}
+    data = {'domain': domain, 'project_id': project_id, 'zone': zone}
+    url = f"{service_url}/list_vms"
 
-    if city.lower() == "new york":
-        tz_identifier = "America/New_York"
-    else:
-        return {
-            "status": "error",
-            "error_message": (
-                f"Sorry, I don't have timezone information for {city}."
-            ),
-        }
-
-    tz = ZoneInfo(tz_identifier)
-    now = datetime.datetime.now(tz)
-    report = (
-        f'The current time in {city} is {now.strftime("%Y-%m-%d %H:%M:%S %Z%z")}'
-    )
-    return {"status": "success", "report": report}
-
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(data))
+        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error listing instances: {e}")
+        return None
 
 root_agent = Agent(
-    name="weather_time_agent",
+    name="finops optimization agent",
     model="gemini-2.0-flash",
     description=(
-        "Agent to answer questions about the time and weather in only new york."
+        "Agent is provided with tools to search the Google compute instances running in Google cloud and delete them when user is requested"
     ),
     instruction=(
-        "You are a helpful agent who can answer user questions about the time and weather in new york only."
+        "You are a helpful agent who can answer user questions about cloud finops. Also, when given instructons by user, you can take actions on the cloud. for eg: list the Google compte engines which are running in cloud. Delete the compte instances "
     ),
-    tools=[get_weather, get_current_time],
+    tools=[delete_vm_instance, list_vm_instances],
 )
+
