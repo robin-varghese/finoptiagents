@@ -56,10 +56,75 @@ def list_vm_instances(domain: str, project_id: str, zone: str):
 
 # Create a DuckDuckGo search tool
 def search_tool(query: str):
+    # --- Configuration ---
+    # The URL of your deployed Cloud Run service endpoint
+    # Ensure it includes the specific path (/search)
+    CLOUD_RUN_URL = "https://ddsearchlangcagent-qcdyf5u6mq-uc.a.run.app/search"
 
-    search = DuckDuckGoSearchRun(output_format="json")
-    search_result = search.invoke(str)
-    print(f"Search Result: {search_result}")
+    # The query you want to send to the agent
+    #search_query = "What are the latest developments in AI regulation in Europe?"
+
+    # Optional: If your agent uses chat history, prepare it
+    # This should match the structure expected by your format_chat_history helper
+    chat_history_example = [
+        {"role": "user", "content": "Tell me about large language models."},
+        {"role": "assistant", "content": "Large language models are advanced AI systems..."}
+    ]
+
+    # --- Prepare the Request ---
+    # This structure MUST match the Pydantic model `SearchRequest` in your FastAPI app
+    payload = {
+        "query": query,
+        # Uncomment and include if your agent uses history:
+        # "chat_history": chat_history_example
+    }
+
+    # Set the headers for sending JSON data
+    headers = {
+        "Content-Type": "application/json"
+    }
+
+    # --- Make the API Call ---
+    print(f"Sending POST request to: {CLOUD_RUN_URL}")
+    print(f"Payload: {json.dumps(payload, indent=2)}") # Log the payload being sent
+
+    try:
+        # Send the POST request
+        response = requests.post(CLOUD_RUN_URL, headers=headers, json=payload, timeout=120) # Set a reasonable timeout (in seconds)
+
+        # --- Handle the Response ---
+        # Check if the request was successful (status code 2xx)
+        response.raise_for_status() # This will raise an HTTPError for bad responses (4xx or 5xx)
+
+        # Parse the JSON response from the server
+        result_data = response.json() # This should match the `SearchResponse` model
+
+        # Extract the result
+        agent_response = result_data.get("result", "No 'result' field found in response.")
+
+        print("\n--- Agent Response ---")
+        print(agent_response)
+
+    except requests.exceptions.Timeout:
+        print(f"Error: The request to {CLOUD_RUN_URL} timed out.")
+    except requests.exceptions.HTTPError as http_err:
+        print(f"HTTP error occurred: {http_err}")
+        print(f"Status Code: {response.status_code}")
+        # Try to print the error detail from the server response if available
+        try:
+            error_detail = response.json()
+            print(f"Server Error Detail: {error_detail}")
+        except json.JSONDecodeError:
+            print(f"Server Response (non-JSON): {response.text}")
+    except requests.exceptions.RequestException as req_err:
+        # Catch other potential errors like connection errors, etc.
+        print(f"An error occurred during the request: {req_err}")
+    except json.JSONDecodeError:
+        print("Error: Failed to decode the JSON response from the server.")
+        print(f"Response Text: {response.text}") # Print raw text if JSON decoding fails
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+
 
 root_agent = Agent(
     name="finops_optimization_agent",
