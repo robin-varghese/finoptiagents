@@ -100,10 +100,11 @@ def search_tool(query: str):
         result_data = response.json() # This should match the `SearchResponse` model
 
         # Extract the result
-        agent_response = result_data.get("result", "No 'result' field found in response.")
+        #agent_response = result_data.get("result", "No 'result' field found in response.")
 
         print("\n--- Agent Response ---")
-        print(agent_response)
+        print(result_data)
+        return result_data
 
     except requests.exceptions.Timeout:
         print(f"Error: The request to {CLOUD_RUN_URL} timed out.")
@@ -130,7 +131,8 @@ root_agent = Agent(
     name="finops_optimization_agent",
     model="gemini-2.0-flash",
     description=(
-        "Agent is provided with tools to search the Google compute instances running in Google cloud and delete them when user is requested"
+        "Agent is provided with tools to search the Google compute instances running in Google cloud (list_vm_instances). When user instructs, delete them using the tool (delete_vm_instance)."
+        " Any other question related to finops can be searched using the tool search_tool"
     ),
     instruction=(
         "You are a helpful agent who can answer user questions about cloud finops. Also, when given instructons by user, you can take actions on the cloud. for eg: list the Google compte engines which are running in cloud. Delete the compte instances "
