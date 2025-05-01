@@ -1,6 +1,6 @@
 import datetime
 from zoneinfo import ZoneInfo
-from google.adk.agents import Agent,LoopAgent,BaseAgent
+from google.adk.agents import Agent,LoopAgent,BaseAgent,LlmAgent
 from langchain_community.tools import DuckDuckGoSearchRun
 import requests
 import json
@@ -127,8 +127,16 @@ def search_tool(query: str):
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
 
-delete_multiple_ins_loop = LoopAgent(
-    name="delete_multiple_ins_loop",
+delete_vm_instance_agent = Agent(
+    name="delete_vm_instance_agent",
+    description=
+    """This agent should use the delete_vm_instance tool""",
+    tools=[delete_vm_instance],
+    )
+  
+
+delete_multiple_ins_loop_agent = LoopAgent(
+    name="delete_multiple_ins_loop_agent",
     description=
     """This agent should use the delete_vm_instance and run it in loop to delete multiple VMs
             tool: delete_vm_instance(project_id, instance_id, zone).
@@ -138,10 +146,11 @@ delete_multiple_ins_loop = LoopAgent(
             can all this loopagent to delete the multiple VMs in a Google project
             Delete the compute instances and return the status in a json format
             """,
-    
+    sub_agents=[delete_vm_instance_agent],
+    max_iterations=10,
     )
 
-root_agent = Agent(
+root_agent = LlmAgent(
     name="finops_optimization_agent",
     model="gemini-2.0-flash",
     description=(
@@ -160,6 +169,6 @@ root_agent = Agent(
         
     ),
     tools=[delete_vm_instance, list_vm_instances, search_tool],
-    sub_agents=[delete_multiple_ins_loop]
+    sub_agents=[delete_multiple_ins_loop_agent]
 )
 
