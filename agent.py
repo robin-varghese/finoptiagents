@@ -1,6 +1,6 @@
 import datetime
 from zoneinfo import ZoneInfo
-from google.adk.agents import Agent
+from google.adk.agents import Agent,LoopAgent,BaseAgent
 from langchain_community.tools import DuckDuckGoSearchRun
 import requests
 import json
@@ -17,9 +17,10 @@ def delete_vm_instance(project_id: str, instance_id: str, zone: str):
     Returns:
         The JSON response from the API, or None if an error occurs.
     """
+    print(f" I am inside delete_vm_instances")
     headers = {'Content-Type': 'application/json'}
     data = {'instance_id': instance_id, 'project_id': project_id, 'zone': zone}
-    url = f"https://list-vms-qcdyf5u6mq-uc.a.run.app/delete_vms"
+    url = f"https://agent-tools-912533822336.us-central1.run.app/delete_vms"
 
     try:
         response = requests.post(url, headers=headers, data=json.dumps(data))
@@ -30,11 +31,10 @@ def delete_vm_instance(project_id: str, instance_id: str, zone: str):
         return None
 
 
-def list_vm_instances(domain: str, project_id: str, zone: str):
+def list_vm_instances(project_id: str, zone: str):
     """Lists VM instances based on domain, project ID, and zone using the /list_vms endpoint.
 
     Args:
-        domain: The domain to filter instances by.
         project_id: The Google Cloud project ID.
         zone: The zone where the instances are located.
         service_url: The URL of the Cloud Run service.
@@ -42,9 +42,10 @@ def list_vm_instances(domain: str, project_id: str, zone: str):
     Returns:
         The JSON response from the API, or None if an error occurs.
     """
+    print(f" I am inside list_vm_instances 'project_id': {project_id}, 'zone': {zone}")
     headers = {'Content-Type': 'application/json'}
-    data = {'domain': domain, 'project_id': project_id, 'zone': zone}
-    url = f"https://list-vms-qcdyf5u6mq-uc.a.run.app/list_vms"
+    data = {'project_id': project_id, 'zone': zone}
+    url = f"https://agent-tools-912533822336.us-central1.run.app/list_vms"
 
     try:
         response = requests.post(url, headers=headers, data=json.dumps(data))
@@ -126,17 +127,37 @@ def search_tool(query: str):
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
 
+delete_multiple_ins_loop = LoopAgent(
+    name="delete_multiple_ins_loop",
+    description=
+    """This agent should use the delete_vm_instance and run it in loop to delete multiple VMs
+            tool: delete_vm_instance(project_id, instance_id, zone).
+            Either agent or the end user can call this loop agent.
+            Agent can provide the entire list of VMs in List of Json
+            User can provide the necessay info in text format and agent can send it to the tool as a List of Json
+            can all this loopagent to delete the multiple VMs in a Google project
+            Delete the compute instances and return the status in a json format
+            """,
+    
+    )
 
 root_agent = Agent(
     name="finops_optimization_agent",
     model="gemini-2.0-flash",
     description=(
-        "Agent is provided with tools to search the Google compute instances running in Google cloud (list_vm_instances). When user instructs, delete them using the tool (delete_vm_instance)."
-        " Any other question related to finops can be searched using the tool search_tool"
+        """Agent is provided with tools to search the Google compute instances running in Google cloud. 
+        This is an API list_vm_instances(project_id, zone). 
+        When user instructs, delete them using the api call which is provided as an tool delete_vm_instance(project_id, instance_id, zone).
+        Any other question related to finops can be searched using the tool search_tool"""
     ),
     instruction=(
-        "You are a helpful agent who can answer user questions about cloud finops. Also, when given instructons by user, you can take actions on the cloud. for eg: list the Google compte engines which are running in cloud. Delete the compte instances "
+        """You are a helpful agent who can answer user questions about cloud finops. 
+        Also, when given instructons by user, you can take actions on the cloud. 
+        for eg: list the Google compte engines which are running in cloud. 
+        Delete the compute instances and return the status in a json format """
+        
     ),
     tools=[delete_vm_instance, list_vm_instances, search_tool],
+    sub_agents=[delete_multiple_ins_loop]
 )
 
