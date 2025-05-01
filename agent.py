@@ -154,7 +154,9 @@ root_agent = Agent(
         """You are a helpful agent who can answer user questions about cloud finops. 
         Also, when given instructons by user, you can take actions on the cloud. 
         for eg: list the Google compte engines which are running in cloud. 
-        Delete the compute instances and return the status in a json format """
+        Use the tool to delete the compute instances and return the status in a json format.
+        This agent should use the delete_multiple_ins_loop sub agent to delete multiple VMs in a loop
+        """
         
     ),
     tools=[delete_vm_instance, list_vm_instances, search_tool],
