@@ -1,9 +1,91 @@
-import datetime
-from zoneinfo import ZoneInfo
 from google.adk.agents import Agent,LoopAgent,BaseAgent,LlmAgent
+from google.adk.sessions import DatabaseSessionService, Session
+from google.adk.runners import Runner
+from google.adk.events import Event, EventActions
+
+from google.cloud import firestore
 from langchain_community.tools import DuckDuckGoSearchRun
+from zoneinfo import ZoneInfo
+
 import requests
 import json
+import datetime
+import time
+
+# --- 1. Define Constants ---
+APP_NAME = "agent_comparison_app"
+USER_ID = "Robin Varghese"
+SESSION_ID_TOOL_AGENT = "session_tool_agent_xyz"
+SESSION_ID_SCHEMA_AGENT = "session_schema_agent_xyz"
+MODEL_NAME = "gemini-2.0-flash"
+
+#*************************START: Agent Common Section**************************************
+
+Initial_state = {
+    "user_name": "Robin Varghese",
+    "user_preferences": """
+        I like to adress the organizational finops challenges is the best and efficient way.
+        I use Google cloud services for my work and I usually suggest Google services to my customers.
+        My LinkedIn profile can be found at https://www.linkedin.com/in/robinkoikkara/
+        """
+}
+
+#Create A New Session
+db_url = "sqlite:///./my_agent_data.db"
+session_service = DatabaseSessionService(db_url=db_url)
+# Create a runner for EACH agent
+greeting_agent = LlmAgent(
+    name="Greeter",
+    model="gemini-2.0-flash", # Use a valid model
+    instruction="Generate a short, friendly greeting.",
+    output_key="last_greeting" # Save response to state['last_greeting']
+)
+capital_runner = Runner(
+    agent=greeting_agent,
+    app_name=APP_NAME,
+    session_service=session_service
+)
+session = session_service.create_session(
+    app_name=APP_NAME,
+    user_id=USER_ID,
+    session_id=SESSION_ID_TOOL_AGENT,
+    state={"user:login_count": 0, "task_status": "idle"}
+)
+print(f"Initial state: {session.state}")
+
+# --- Define State Changes ---
+current_time = time.time()
+state_changes = {
+    "task_status": "active",              # Update session state
+    "user:login_count": session.state.get("user:login_count", 0) + 1, # Update user state
+    "user:last_login_ts": current_time,   # Add user state
+    "temp:validation_needed": True        # Add temporary state (will be discarded)
+}
+
+# --- Create Event with Actions ---
+actions_with_update = EventActions(state_delta=state_changes)
+# This event might represent an internal system action, not just an agent response
+system_event = Event(
+    invocation_id="inv_login_update",
+    author="system", # Or 'agent', 'tool' etc.
+    actions=actions_with_update,
+    timestamp=current_time
+    # content might be None or represent the action taken
+)
+
+# --- Append the Event (This updates the state) ---
+session_service.append_event(session, system_event)
+print("`append_event` called with explicit state delta.")
+
+# --- Check Updated State ---
+updated_session = session_service.get_session(app_name=APP_NAME,
+                                            user_id=USER_ID, 
+                                            session_id=SESSION_ID_TOOL_AGENT)
+print(f"State after event: {updated_session.state}")
+# Expected: {'user:login_count': 1, 'task_status': 'active', 'user:last_login_ts': <timestamp>}
+# Note: 'temp:validation_needed' is NOT present.
+#*************************End: Agent Common Section**************************************
+#*************************START: TOOLS Section**************************************
 
 def delete_vm_instance(project_id: str, instance_id: str, zone: str):
     """Deletes a VM instance using the /delete_vms endpoint.
@@ -29,7 +111,6 @@ def delete_vm_instance(project_id: str, instance_id: str, zone: str):
     except requests.exceptions.RequestException as e:
         print(f"Error deleting instance: {e}")
         return None
-
 
 def list_vm_instances(project_id: str, zone: str):
     """Lists VM instances based on domain, project ID, and zone using the /list_vms endpoint.
@@ -127,13 +208,15 @@ def search_tool(query: str):
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
 
+#*************************END: TOOLS Section**************************************
+
+#*************************START: Agents Section**************************************
 delete_vm_instance_agent = Agent(
     name="delete_vm_instance_agent",
     description=
     """This agent should use the delete_vm_instance tool""",
     tools=[delete_vm_instance],
     )
-  
 
 delete_multiple_ins_loop_agent = LoopAgent(
     name="delete_multiple_ins_loop_agent",
@@ -147,8 +230,10 @@ delete_multiple_ins_loop_agent = LoopAgent(
             Delete the compute instances and return the status in a json format
             """,
     sub_agents=[delete_vm_instance_agent],
+    #TODO change max_iterations to variable instead of fixed value
     max_iterations=10,
     )
+
 
 root_agent = LlmAgent(
     name="finops_optimization_agent",
@@ -166,9 +251,8 @@ root_agent = LlmAgent(
         Use the tool to delete the compute instances and return the status in a json format.
         This agent should use the delete_multiple_ins_loop sub agent to delete multiple VMs in a loop
         """
-        
     ),
-    tools=[delete_vm_instance, list_vm_instances, search_tool],
+    tools=[greeting_agent,delete_vm_instance, list_vm_instances, search_tool],
     sub_agents=[delete_multiple_ins_loop_agent]
 )
-
+#*************************END: Agents Section**************************************
