@@ -2,8 +2,9 @@ from google.adk.agents import Agent,LoopAgent,BaseAgent,LlmAgent
 from google.adk.sessions import DatabaseSessionService, Session
 from google.adk.runners import Runner
 from google.adk.events import Event, EventActions
+from google.adk.sessions import VertexAiSessionService
+from pydantic import BaseModel # Or from wherever ADK makes it accessible
 
-from google.cloud import firestore
 from langchain_community.tools import DuckDuckGoSearchRun
 from zoneinfo import ZoneInfo
 
@@ -11,13 +12,28 @@ import requests
 import json
 import datetime
 import time
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+GOOGLE_PROJECT_ID=os.getenv("GOOGLE_PROJECT_ID")
+GOOGLE_ZONE=os.getenv("GOOGLE_ZONE")
+GOOGLE_API_KEY=os.getenv("GOOGLE_API_KEY")
+GOOGLE_GENAI_USE_VERTEXAI=os.getenv("GOOGLE_GENAI_USE_VERTEXAI")
+
 
 # --- 1. Define Constants ---
 APP_NAME = "agent_comparison_app"
 USER_ID = "Robin Varghese"
-SESSION_ID_TOOL_AGENT = "session_tool_agent_xyz"
+BASE_SESSION_ID_TOOL_AGENT = "session_tool_agent_xyz"
 SESSION_ID_SCHEMA_AGENT = "session_schema_agent_xyz"
+current_session_id_tool_agent = BASE_SESSION_ID_TOOL_AGENT + str(time.time())
 MODEL_NAME = "gemini-2.0-flash"
+
+# Define a minimal Pydantic model for event content if no specific fields are needed
+class EmptyEventContent(BaseModel):
+    pass
 
 #*************************START: Agent Common Section**************************************
 
@@ -31,8 +47,14 @@ Initial_state = {
 }
 
 #Create A New Session
+
+# Example using a local SQLite file:
 db_url = "sqlite:///./my_agent_data.db"
 session_service = DatabaseSessionService(db_url=db_url)
+# Use REASONING_ENGINE_APP_NAME when calling service methods, e.g.:
+# session_service.create_session(app_name=REASONING_ENGINE_APP_NAME, ...)
+
+
 # Create a runner for EACH agent
 greeting_agent = LlmAgent(
     name="Greeter",
@@ -48,10 +70,11 @@ capital_runner = Runner(
 session = session_service.create_session(
     app_name=APP_NAME,
     user_id=USER_ID,
-    session_id=SESSION_ID_TOOL_AGENT,
+    session_id=current_session_id_tool_agent,
     state={"user:login_count": 0, "task_status": "idle"}
 )
-print(f"Initial state: {session.state}")
+
+print(f"Initial state for session {current_session_id_tool_agent}: {session.state}")
 
 # --- Define State Changes ---
 current_time = time.time()
@@ -64,12 +87,14 @@ state_changes = {
 
 # --- Create Event with Actions ---
 actions_with_update = EventActions(state_delta=state_changes)
+
 # This event might represent an internal system action, not just an agent response
 system_event = Event(
     invocation_id="inv_login_update",
     author="system", # Or 'agent', 'tool' etc.
     actions=actions_with_update,
-    timestamp=current_time
+    timestamp=current_time,
+    content=EmptyEventContent()  # <--- ADD THIS LINE
     # content might be None or represent the action taken
 )
 
@@ -80,8 +105,13 @@ print("`append_event` called with explicit state delta.")
 # --- Check Updated State ---
 updated_session = session_service.get_session(app_name=APP_NAME,
                                             user_id=USER_ID, 
-                                            session_id=SESSION_ID_TOOL_AGENT)
-print(f"State after event: {updated_session.state}")
+                                            session_id=current_session_id_tool_agent)
+
+if updated_session:
+    print(f"State after event for session {current_session_id_tool_agent}: {updated_session.state}")
+else:
+    print(f"Could not retrieve session with ID: {current_session_id_tool_agent}")
+
 # Expected: {'user:login_count': 1, 'task_status': 'active', 'user:last_login_ts': <timestamp>}
 # Note: 'temp:validation_needed' is NOT present.
 #*************************End: Agent Common Section**************************************
@@ -252,7 +282,7 @@ root_agent = LlmAgent(
         This agent should use the delete_multiple_ins_loop sub agent to delete multiple VMs in a loop
         """
     ),
-    tools=[greeting_agent,delete_vm_instance, list_vm_instances, search_tool],
+    tools=[delete_vm_instance, list_vm_instances, search_tool],
     sub_agents=[delete_multiple_ins_loop_agent]
 )
 #*************************END: Agents Section**************************************
