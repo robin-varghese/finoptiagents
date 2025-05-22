@@ -3,17 +3,21 @@ from google.adk.sessions import DatabaseSessionService, Session
 from google.adk.runners import Runner
 from google.adk.events import Event, EventActions
 from google.adk.sessions import VertexAiSessionService
-from pydantic import BaseModel # Or from wherever ADK makes it accessible
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.models import LlmResponse, LlmRequest
 
+from pydantic import BaseModel # Or from wherever ADK makes it accessible
+from typing import Optional
+from google.genai import types 
 from langchain_community.tools import DuckDuckGoSearchRun
 from zoneinfo import ZoneInfo
-
+from dotenv import load_dotenv
 import requests
 import json
 import datetime
 import time
 import os
-from dotenv import load_dotenv
+
 
 load_dotenv()
 
@@ -35,86 +39,7 @@ MODEL_NAME = "gemini-2.0-flash"
 class EmptyEventContent(BaseModel):
     pass
 
-#*************************START: Agent Common Section**************************************
 
-Initial_state = {
-    "user_name": "Robin Varghese",
-    "user_preferences": """
-        I like to adress the organizational finops challenges is the best and efficient way.
-        I use Google cloud services for my work and I usually suggest Google services to my customers.
-        My LinkedIn profile can be found at https://www.linkedin.com/in/robinkoikkara/
-        """
-}
-
-#Create A New Session
-
-# Example using a local SQLite file:
-db_url = "sqlite:///./my_agent_data.db"
-session_service = DatabaseSessionService(db_url=db_url)
-# Use REASONING_ENGINE_APP_NAME when calling service methods, e.g.:
-# session_service.create_session(app_name=REASONING_ENGINE_APP_NAME, ...)
-
-
-# Create a runner for EACH agent
-greeting_agent = LlmAgent(
-    name="Greeter",
-    model="gemini-2.0-flash", # Use a valid model
-    instruction="Generate a short, friendly greeting.",
-    output_key="last_greeting" # Save response to state['last_greeting']
-)
-capital_runner = Runner(
-    agent=greeting_agent,
-    app_name=APP_NAME,
-    session_service=session_service
-)
-session = session_service.create_session(
-    app_name=APP_NAME,
-    user_id=USER_ID,
-    session_id=current_session_id_tool_agent,
-    state={"user:login_count": 0, "task_status": "idle"}
-)
-
-print(f"Initial state for session {current_session_id_tool_agent}: {session.state}")
-
-# --- Define State Changes ---
-current_time = time.time()
-state_changes = {
-    "task_status": "active",              # Update session state
-    "user:login_count": session.state.get("user:login_count", 0) + 1, # Update user state
-    "user:last_login_ts": current_time,   # Add user state
-    "temp:validation_needed": True        # Add temporary state (will be discarded)
-}
-
-# --- Create Event with Actions ---
-actions_with_update = EventActions(state_delta=state_changes)
-
-# This event might represent an internal system action, not just an agent response
-system_event = Event(
-    invocation_id="inv_login_update",
-    author="system", # Or 'agent', 'tool' etc.
-    actions=actions_with_update,
-    timestamp=current_time,
-    content=EmptyEventContent()  # <--- ADD THIS LINE
-    # content might be None or represent the action taken
-)
-
-# --- Append the Event (This updates the state) ---
-session_service.append_event(session, system_event)
-print("`append_event` called with explicit state delta.")
-
-# --- Check Updated State ---
-updated_session = session_service.get_session(app_name=APP_NAME,
-                                            user_id=USER_ID, 
-                                            session_id=current_session_id_tool_agent)
-
-if updated_session:
-    print(f"State after event for session {current_session_id_tool_agent}: {updated_session.state}")
-else:
-    print(f"Could not retrieve session with ID: {current_session_id_tool_agent}")
-
-# Expected: {'user:login_count': 1, 'task_status': 'active', 'user:last_login_ts': <timestamp>}
-# Note: 'temp:validation_needed' is NOT present.
-#*************************End: Agent Common Section**************************************
 #*************************START: TOOLS Section**************************************
 
 def delete_vm_instance(project_id: str, instance_id: str, zone: str):
@@ -239,13 +164,76 @@ def search_tool(query: str):
         print(f"An unexpected error occurred: {e}")
 
 #*************************END: TOOLS Section**************************************
+#*************************START: Call BAck ***************************************
+def simple_before_model_modifier(
+    callback_context: CallbackContext, llm_request: LlmRequest
+) -> Optional[LlmResponse]:
+    """Inspects/modifies the LLM request or skips the call."""
+    agent_name = callback_context.agent_name
+    print(f"[Callback] Before model call for agent: {agent_name}")
 
+    # Inspect the last user message in the request contents
+    last_user_message = ""
+    if llm_request.contents:
+        last_content_item = llm_request.contents[-1]
+        if last_content_item.role == 'user' and last_content_item.parts:
+            # Ensure the text part exists and is not None, otherwise keep empty string
+            if last_content_item.parts[0].text is not None:
+                last_user_message = last_content_item.parts[0].text
+            # else: last_user_message_text remains ""
+
+    print(f"[Callback] Inspecting last user message: '{last_user_message}'")
+
+    # --- Modification Example ---
+    # Add a prefix to the system instruction
+    original_instruction = llm_request.config.system_instruction or types.Content(role="system", parts=[])
+    prefix = "[Modified by Callback] "
+    # Ensure system_instruction is Content and parts list exists
+    if not isinstance(original_instruction, types.Content):
+         # Handle case where it might be a string (though config expects Content)
+         original_instruction = types.Content(role="system", parts=[types.Part(text=str(original_instruction))])
+    if not original_instruction.parts:
+        original_instruction.parts.append(types.Part(text="")) # Add an empty part if none exist
+
+    # Modify the text of the first part
+    modified_text = prefix + (original_instruction.parts[0].text or "")
+    original_instruction.parts[0].text = modified_text
+    llm_request.config.system_instruction = original_instruction
+    print(f"[Callback] Modified system instruction to: '{modified_text}'")
+
+    # --- Skip Example ---
+    # Check if the last user message contains "BLOCK"
+    if "BLOCK" in last_user_message.upper():
+        print("[Callback] 'BLOCK' keyword found. Skipping LLM call.")
+        # Return an LlmResponse to skip the actual LLM call
+        return LlmResponse(
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text="LLM call was blocked by before_model_callback.")],
+            )
+        )
+    else:
+        print("[Callback] Proceeding with LLM call.")
+        # Return None to allow the (modified) request to go to the LLM
+        return None
+#**************************END: Call Back *****************************************
 #*************************START: Agents Section**************************************
+# Create a runner for EACH agent
+greeting_agent = LlmAgent(
+    name="Greeter",
+    description=
+    """This agent should greet the user when logged-in""",
+    model="gemini-2.0-flash", # Use a valid model
+    instruction="Generate a short, friendly greeting.",
+    output_key="last_greeting"
+)
+
 delete_vm_instance_agent = Agent(
     name="delete_vm_instance_agent",
     description=
     """This agent should use the delete_vm_instance tool""",
     tools=[delete_vm_instance],
+    before_model_callback=simple_before_model_modifier # Assign the function here
     )
 
 delete_multiple_ins_loop_agent = LoopAgent(
@@ -261,7 +249,7 @@ delete_multiple_ins_loop_agent = LoopAgent(
             """,
     sub_agents=[delete_vm_instance_agent],
     #TODO change max_iterations to variable instead of fixed value
-    max_iterations=10,
+    max_iterations=10
     )
 
 
@@ -276,6 +264,7 @@ root_agent = LlmAgent(
     ),
     instruction=(
         """You are a helpful agent who can answer user questions about cloud finops. 
+        When user logs-in greet the user with the tool greeting_agent.
         Also, when given instructons by user, you can take actions on the cloud. 
         for eg: list the Google compte engines which are running in cloud. 
         Use the tool to delete the compute instances and return the status in a json format.
@@ -283,6 +272,81 @@ root_agent = LlmAgent(
         """
     ),
     tools=[delete_vm_instance, list_vm_instances, search_tool],
-    sub_agents=[delete_multiple_ins_loop_agent]
+    sub_agents=[delete_multiple_ins_loop_agent,greeting_agent],
+    before_model_callback=simple_before_model_modifier # Assign the function here
 )
 #*************************END: Agents Section**************************************
+#*************************START: Agent Common Section**************************************
+
+Initial_state = {
+    "user_name": "Robin Varghese",
+    "user_preferences": """
+        I like to adress the organizational finops challenges is the best and efficient way.
+        I use Google cloud services for my work and I usually suggest Google services to my customers.
+        My LinkedIn profile can be found at https://www.linkedin.com/in/robinkoikkara/
+        """
+}
+
+#Create A New Session
+
+# Example using a local SQLite file:
+db_url = "sqlite:///./my_agent_data.db"
+session_service = DatabaseSessionService(db_url=db_url)
+# Use REASONING_ENGINE_APP_NAME when calling service methods, e.g.:
+# session_service.create_session(app_name=REASONING_ENGINE_APP_NAME, ...)
+
+
+
+capital_runner = Runner(
+    agent=root_agent,
+    app_name=APP_NAME,
+    session_service=session_service
+)
+session = session_service.create_session(
+    app_name=APP_NAME,
+    user_id=USER_ID,
+    session_id=current_session_id_tool_agent,
+    state={"user:login_count": 0, "task_status": "idle"}
+)
+
+print(f"Initial state for session {current_session_id_tool_agent}: {session.state}")
+
+# --- Define State Changes ---
+current_time = time.time()
+state_changes = {
+    "task_status": "active",              # Update session state
+    "user:login_count": session.state.get("user:login_count", 0) + 1, # Update user state
+    "user:last_login_ts": current_time,   # Add user state
+    "temp:validation_needed": True        # Add temporary state (will be discarded)
+}
+
+# --- Create Event with Actions ---
+actions_with_update = EventActions(state_delta=state_changes)
+
+# This event might represent an internal system action, not just an agent response
+system_event = Event(
+    invocation_id="inv_login_update",
+    author="system", # Or 'agent', 'tool' etc.
+    actions=actions_with_update,
+    timestamp=current_time,
+    content=EmptyEventContent()  # <--- ADD THIS LINE
+    # content might be None or represent the action taken
+)
+
+# --- Append the Event (This updates the state) ---
+session_service.append_event(session, system_event)
+print("`append_event` called with explicit state delta.")
+
+# --- Check Updated State ---
+updated_session = session_service.get_session(app_name=APP_NAME,
+                                            user_id=USER_ID, 
+                                            session_id=current_session_id_tool_agent)
+
+if updated_session:
+    print(f"State after event for session {current_session_id_tool_agent}: {updated_session.state}")
+else:
+    print(f"Could not retrieve session with ID: {current_session_id_tool_agent}")
+
+# Expected: {'user:login_count': 1, 'task_status': 'active', 'user:last_login_ts': <timestamp>}
+# Note: 'temp:validation_needed' is NOT present.
+#*************************End: Agent Common Section**************************************
