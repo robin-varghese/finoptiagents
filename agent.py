@@ -17,7 +17,10 @@ import json
 import datetime
 import time
 import os
-
+import uuid # For generating unique IDs or for user_id if not available elsewhere
+from toolbox_core import ToolboxClient
+from .test_pg_vector_openai import generate_combined_embedding
+#from toolbox_langchain import ToolboxClient
 
 load_dotenv()
 
@@ -39,7 +42,23 @@ MODEL_NAME = "gemini-2.0-flash"
 class EmptyEventContent(BaseModel):
     pass
 
+#load the MCP based toolset
+# This will load all tools
+client = ToolboxClient(os.getenv("MCP_TOOLBOX_URL")) # Or whatever port you're using
+try:
+    # Try loading all tools first to see if the basic /api/toolset/ endpoint works
+    # print("Attempting to load all tools...")
+    # all_defined_tools = client.load_toolset()
+    # print("Successfully loaded all tools:", all_defined_tools)
 
+    print("Attempting to load specific toolset {'my_googleaiagent_toolset'}...")
+    my_tools = client.load_toolset(os.getenv("TOOLSET_NAME_FOR_LOGGING"))
+    print("Successfully loaded toolset 'my_googleaiagent_toolset':", my_tools)
+
+except Exception as e:
+    print(f"Error loading toolset: {e}")
+    import traceback
+    traceback.print_exc()
 #*************************START: TOOLS Section**************************************
 
 def delete_vm_instance(project_id: str, instance_id: str, zone: str):
@@ -216,6 +235,117 @@ def simple_before_model_modifier(
         print("[Callback] Proceeding with LLM call.")
         # Return None to allow the (modified) request to go to the LLM
         return None
+    
+#*************************START: Call Back ***************************************
+# ... (your existing simple_before_model_modifier) ...
+
+def log_interaction_after_model(
+    callback_context: CallbackContext,
+    llm_request: LlmRequest,
+    llm_response: LlmResponse
+) -> None:
+    """
+    Logs the user interaction (last user prompt and LLM response)
+    to the PostgreSQL database via the MCP Toolbox.
+    """
+    print("[Callback] After model call triggered.")
+
+    if not my_tools:
+        print("[Callback] ToolboxClient not initialized. Skipping logging.")
+        return
+
+    try:
+        # 1. Extract User ID
+        #    - From session state if available
+        #    - From CallbackContext if available (might have user_id)
+        #    - Or use a default/placeholder
+        user_id_to_log = "unknown_user" # Default
+        if callback_context.session_id: # ADK sessions are often linked to user_id at creation
+            # This is a bit indirect. Ideally, user_id is directly in context or state
+            # For this example, let's assume we can get it from the global USER_ID constant,
+            # but in a real app, you'd fetch it from the current session's metadata.
+            user_id_to_log = USER_ID # Using the global constant for simplicity here
+
+        # 2. Extract Last User Action (Prompt)
+        user_action_text = "No user prompt found in request."
+        if llm_request.contents:
+            # Iterate backwards to find the last 'user' role message
+            for content_item in reversed(llm_request.contents):
+                if content_item.role == 'user' and content_item.parts:
+                    if content_item.parts[0].text is not None:
+                        user_action_text = content_item.parts[0].text
+                        break
+        
+        action_details = {
+            "prompt": user_action_text,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "agent_name": callback_context.agent_name,
+            "llm_request_id": llm_request.id if hasattr(llm_request, 'id') else str(uuid.uuid4()) # if LlmRequest has an ID
+        }
+        action_json_string = json.dumps(action_details)
+
+        # 3. Extract LLM Result (Response)
+        llm_result_text = "No text response from LLM."
+        llm_function_call = None
+        if llm_response.content and llm_response.content.parts:
+            # Consolidate text parts
+            text_parts = [part.text for part in llm_response.content.parts if part.text]
+            if text_parts:
+                llm_result_text = " ".join(text_parts)
+            
+            # Check for function call
+            for part in llm_response.content.parts:
+                if part.function_call:
+                    llm_function_call = {
+                        "name": part.function_call.name,
+                        "args": part.function_call.args, # This might be a dict-like object
+                    }
+                    break # Assuming one function call per response for simplicity
+
+        result_details = {
+            "response_text": llm_result_text,
+            "function_call": llm_function_call, # Will be None if no function call
+            "llm_response_id": llm_response.id if hasattr(llm_response, 'id') else str(uuid.uuid4()) # if LlmResponse has an ID
+        }
+        result_json_string = json.dumps(result_details)
+
+        # 4. Generate Vector Embedding
+        #    Combine relevant parts of action and result for embedding
+        text_for_embedding1_action = user_action_text
+        text_for_embedding2_result = llm_result_text
+        if llm_function_call:
+            text_for_embedding2 += f" (Function Call: {llm_function_call['name']})"
+
+        vector_list = generate_combined_embedding(user_id_to_log, text_for_embedding1_action, text_for_embedding2_result)
+        # pgvector expects a string like '[0.1,0.2,0.3,...]'
+        vector_string = "[" + ",".join(map(str, vector_list)) + "]"
+
+        # 5. Call the MCP Toolbox Tool
+        tool_params = {
+            "user_id": user_id_to_log,
+            "action": action_json_string,
+            "result": result_json_string,
+            "vector_value": vector_string
+        }
+
+        print(f"[Callback] Calling MCP tool '{my_tools.log_interaction_after_model}' with params: {tool_params}")
+        # Assuming the tool is within the default toolset loaded or MCP handles it by name
+        # If your tool is part of a specific toolset and `call_tool` needs that info,
+        # you might need to adjust. The `ToolboxClient` API for `call_tool` is key here.
+        # The MCP `call_tool` often takes `tool_name` and `tool_input_dict`.
+        response = my_tools.call_tool(
+            tool_name=os.getenv("LOGGING_TOOL_NAME"),
+            tool_input=tool_params,
+            # toolset_name=TOOLSET_NAME_FOR_LOGGING # Only if required by your client.call_tool
+        )
+        print(f"[Callback] MCP tool call response: {response}")
+
+    except Exception as e:
+        print(f"[Callback] Error during after_model_callback logging: {e}")
+        import traceback
+        traceback.print_exc()
+
+#**************************END: Call Back *****************************************    
 #**************************END: Call Back *****************************************
 #*************************START: Agents Section**************************************
 # Create a runner for EACH agent
@@ -273,7 +403,8 @@ root_agent = LlmAgent(
     ),
     tools=[delete_vm_instance, list_vm_instances, search_tool],
     sub_agents=[delete_multiple_ins_loop_agent,greeting_agent],
-    before_model_callback=simple_before_model_modifier # Assign the function here
+    before_model_callback=simple_before_model_modifier, # Assign the function here
+    after_model_callback=log_interaction_after_model # <--- ASSIGN NEW CALLBACK HERE
 )
 #*************************END: Agents Section**************************************
 #*************************START: Agent Common Section**************************************
