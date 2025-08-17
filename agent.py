@@ -12,6 +12,10 @@ from google.genai import types
 from langchain_community.tools import DuckDuckGoSearchRun
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
+import vertexai  
+
+import vertexai.agent_engines
+
 import requests
 import json
 import datetime
@@ -20,15 +24,29 @@ import os
 import uuid # For generating unique IDs or for user_id if not available elsewhere
 from toolbox_core import ToolboxClient
 from .test_pg_vector_openai import generate_combined_embedding
+import asyncio # <-- Add this import
+
 #from toolbox_langchain import ToolboxClient
 
 load_dotenv()
+
+# Initialize Vertex AI SDK - This is crucial for ReasoningEngine to work
+if os.getenv("GOOGLE_PROJECT_ID") and os.getenv("GOOGLE_ZONE"):
+    # Reasoning Engines are regional, so we extract the region from the zone
+    # e.g., 'us-central1-a' -> 'us-central1'
+    google_region = "-".join(os.getenv("GOOGLE_ZONE").split("-")[:-1])
+    vertexai.init(
+        project=os.getenv("GOOGLE_PROJECT_ID"), location=google_region
+    )
+    print(f"Vertex AI initialized for project '{os.getenv('GOOGLE_PROJECT_ID')}' in region '{google_region}'")
+else:
+    print("Skipping Vertex AI initialization. GOOGLE_PROJECT_ID and/or GOOGLE_ZONE not set in .env file.")
 
 GOOGLE_PROJECT_ID=os.getenv("GOOGLE_PROJECT_ID")
 GOOGLE_ZONE=os.getenv("GOOGLE_ZONE")
 GOOGLE_API_KEY=os.getenv("GOOGLE_API_KEY")
 GOOGLE_GENAI_USE_VERTEXAI=os.getenv("GOOGLE_GENAI_USE_VERTEXAI")
-
+REMOTE_CPU_AGENT_RESOURCE_NAME=os.getenv("REMOTE_CPU_AGENT_RESOURCE_NAME")
 
 # --- 1. Define Constants ---
 APP_NAME = "agent_comparison_app"
@@ -42,23 +60,20 @@ MODEL_NAME = "gemini-2.0-flash"
 class EmptyEventContent(BaseModel):
     pass
 
+# Define at module scope so they are accessible in callbacks
+my_tools = None
+useraction_insert_mcptool = None
+
 #load the MCP based toolset
 # This will load all tools
-client = ToolboxClient(os.getenv("MCP_TOOLBOX_URL")) # Or whatever port you're using
-try:
-    # Try loading all tools first to see if the basic /api/toolset/ endpoint works
-    # print("Attempting to load all tools...")
-    # all_defined_tools = client.load_toolset()
-    # print("Successfully loaded all tools:", all_defined_tools)
+# --- MODIFIED: ToolboxClient Setup ---
 
-    print("Attempting to load specific toolset {'my_googleaiagent_toolset'}...")
-    my_tools = client.load_toolset(os.getenv("TOOLSET_NAME_FOR_LOGGING"))
-    print("Successfully loaded toolset 'my_googleaiagent_toolset':", my_tools)
+client = ToolboxClient(os.getenv("MCP_TOOLBOX_URL"))
+# Define global variables to hold the loaded tools
+my_tools = None
+useraction_insert_mcptool = None
 
-except Exception as e:
-    print(f"Error loading toolset: {e}")
-    import traceback
-    traceback.print_exc()
+
 #*************************START: TOOLS Section**************************************
 
 def delete_vm_instance(project_id: str, instance_id: str, zone: str):
@@ -182,6 +197,85 @@ def search_tool(query: str):
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
 
+# Add this new helper function
+# In your local orchestrator's agent.py file
+# In your local orchestrator's agent.py file
+def _get_streamed_response_sync(query: str, resource_name: str) -> str:
+    """
+    A synchronous helper that calls the agent and correctly parses the
+    streaming response dictionaries to build the final response string.
+    """
+    print("Executing synchronous stream_query call in a new thread...")
+    try:
+        remote_agent = vertexai.agent_engines.get(resource_name)
+        stream = remote_agent.stream_query(
+            message=query,
+            user_id="local-orchestrator-agent"
+        )
+        
+        response_parts = []
+        
+        # Use a regular 'for' loop
+        for event in stream:
+            print(f"Received stream event: {event}")
+
+            # --- FINAL FIX: Correctly parse the 'content' dictionary ---
+            # Check if the 'content' key exists and is a dictionary
+            if isinstance(event.get("content"), dict):
+                content = event["content"]
+                # Check if 'parts' exists and is a list
+                if isinstance(content.get("parts"), list):
+                    for part in content["parts"]:
+                        # Check if the part is a dictionary and has a 'text' key
+                        if isinstance(part, dict) and "text" in part:
+                            text_chunk = part["text"]
+                            if text_chunk:
+                                print(f"Extracted text chunk: {text_chunk}")
+                                response_parts.append(text_chunk)
+        
+        final_response = "".join(response_parts).strip()
+        
+        # Check if we actually got a response before returning
+        if not final_response:
+             print("WARNING: No text parts found in any event from the stream.")
+             return "No text response could be parsed from the remote agent's stream."
+        
+        return final_response
+
+    except Exception as e:
+        print(f"Error inside synchronous stream helper: {e}")
+        import traceback
+        traceback.print_exc()
+        return f"Error during synchronous stream call: {str(e)}"
+# This is the new, correct implementation that mimics your working notebook
+# This tool remains an 'async def'
+async def call_cpu_utilization_agent(project_id: str, zone: str) -> str:
+    """
+    Asynchronously calls the remote Agent Engine agent by running the
+    synchronous stream iteration in a separate thread.
+    """
+    print(f"--> [Local Agent Tool] Calling remote agent via asyncio.to_thread")
+    if not REMOTE_CPU_AGENT_RESOURCE_NAME:
+        return "Error: REMOTE_CPU_AGENT_RESOURCE_NAME is not set in the environment."
+        
+    try:
+        query = f"What is the CPU utilization for all VMs in project {project_id} and zone {zone}?"
+        
+        # Run the synchronous helper function in a separate thread
+        final_response = await asyncio.to_thread(
+            _get_streamed_response_sync,
+            query,
+            REMOTE_CPU_AGENT_RESOURCE_NAME
+        )
+        
+        print(f"<-- [Remote Agent Final Response] {final_response}")
+        return final_response
+
+    except Exception as e:
+        print(f"Error in async tool 'call_cpu_utilization_agent': {e}")
+        return f"An unexpected error occurred in the async tool wrapper: {str(e)}"
+
+# { ... your existing tools like delete_vm_instance, list_vm_instances, etc. ... }
 #*************************END: TOOLS Section**************************************
 #*************************START: Call BAck ***************************************
 def simple_before_model_modifier(
@@ -237,115 +331,98 @@ def simple_before_model_modifier(
         return None
     
 #*************************START: Call Back ***************************************
-# ... (your existing simple_before_model_modifier) ...
+# (Global initializations for client/my_tools, USER_ID, LOGGING_TOOL_NAME, generate_combined_embedding remain)
+# Ensure 'client' is your initialized ToolboxClient instance, not 'my_tools' for calling methods.
+# I've changed 'my_tools' back to 'client' in the logging check and call_tool.
+
+# Ensure 'toolbox_client' is defined and initialized at the module level as previously discussed
+# For example:
+# try:
+#     toolbox_client = ToolboxClient(os.getenv("MCP_TOOLBOX_URL"))
+#     toolbox_client.load_toolset(os.getenv("TOOLSET_NAME_FOR_LOGGING", "my_googleaiagent_toolset"))
+#     print("ToolboxClient initialized and toolset loaded.")
+# except Exception as e:
+#     print(f"CRITICAL: Failed to initialize ToolboxClient: {e}")
+#     toolbox_client = None
+
+
+# Find this function in your code and replace it completely with the following:
 
 def log_interaction_after_model(
     callback_context: CallbackContext,
-    llm_request: LlmRequest,
     llm_response: LlmResponse
 ) -> None:
     """
-    Logs the user interaction (last user prompt and LLM response)
-    to the PostgreSQL database via the MCP Toolbox.
+    Logs the LLM response. On the first run, it will load the async toolset.
     """
+    global my_tools, useraction_insert_mcptool
     print("[Callback] After model call triggered.")
 
-    if not my_tools:
-        print("[Callback] ToolboxClient not initialized. Skipping logging.")
+    # --- NEW LAZY-LOADING LOGIC ---
+    # Check if the tools have been loaded. If not, load them now.
+    if my_tools is None:
+        print("[Callback] First run: Loading MCP toolset asynchronously...")
+        try:
+            # Use asyncio.run() to execute and wait for the async function
+            # from this synchronous context.
+            loaded_tools = asyncio.run(client.load_toolset(os.getenv("TOOLSET_NAME_FOR_LOGGING")))
+            
+            # This check is important because toolbox-core might return None on failure
+            if loaded_tools:
+                my_tools = loaded_tools
+                useraction_insert_mcptool = os.getenv("LOGGING_TOOL_NAME")
+                print(f"[Callback] MCP toolset loaded successfully: {my_tools}")
+            else:
+                # Use a sentinel value to indicate failure and prevent retries
+                print("[Callback] MCP toolset loading returned None. Disabling logging.")
+                my_tools = "FAILED_TO_LOAD" 
+        except Exception as e:
+            print(f"[Callback] CRITICAL ERROR loading MCP toolset: {e}")
+            my_tools = "FAILED_TO_LOAD" # Mark as failed to prevent retrying every time
+    
+    # If loading failed or hasn't succeeded, skip the rest of the function.
+    if not my_tools or my_tools == "FAILED_TO_LOAD" or not useraction_insert_mcptool:
+        print("[Callback] MCP Toolset not available. Skipping logging.")
         return
 
+    # --- Your original logging logic can now proceed safely ---
     try:
-        # 1. Extract User ID
-        #    - From session state if available
-        #    - From CallbackContext if available (might have user_id)
-        #    - Or use a default/placeholder
-        user_id_to_log = "unknown_user" # Default
-        if callback_context.session_id: # ADK sessions are often linked to user_id at creation
-            # This is a bit indirect. Ideally, user_id is directly in context or state
-            # For this example, let's assume we can get it from the global USER_ID constant,
-            # but in a real app, you'd fetch it from the current session's metadata.
-            user_id_to_log = USER_ID # Using the global constant for simplicity here
+        user_id_to_log = USER_ID
+        session_id_to_log = "unknown_session"
+        if hasattr(callback_context, 'invocation_context') and hasattr(callback_context.invocation_context, 'session_id'):
+            session_id_to_log = callback_context.invocation_context.session_id
 
-        # 2. Extract Last User Action (Prompt)
-        user_action_text = "No user prompt found in request."
-        if llm_request.contents:
-            # Iterate backwards to find the last 'user' role message
-            for content_item in reversed(llm_request.contents):
-                if content_item.role == 'user' and content_item.parts:
-                    if content_item.parts[0].text is not None:
-                        user_action_text = content_item.parts[0].text
-                        break
-        
-        action_details = {
-            "prompt": user_action_text,
-            "timestamp": datetime.datetime.now().isoformat(),
-            "agent_name": callback_context.agent_name,
-            "llm_request_id": llm_request.id if hasattr(llm_request, 'id') else str(uuid.uuid4()) # if LlmRequest has an ID
-        }
-        action_json_string = json.dumps(action_details)
+        # ... (Your logic to prepare action_json_string, result_json_string, vector_string) ...
+        # (This is just a placeholder for your actual logic which seems correct)
+        action_json_string = json.dumps({"agent": callback_context.agent_name})
+        result_json_string = json.dumps({"response": "..."})
+        vector_list = generate_combined_embedding(user_id_to_log, action_json_string, result_json_string)
+        vector_string = str(vector_list)
 
-        # 3. Extract LLM Result (Response)
-        llm_result_text = "No text response from LLM."
-        llm_function_call = None
-        if llm_response.content and llm_response.content.parts:
-            # Consolidate text parts
-            text_parts = [part.text for part in llm_response.content.parts if part.text]
-            if text_parts:
-                llm_result_text = " ".join(text_parts)
-            
-            # Check for function call
-            for part in llm_response.content.parts:
-                if part.function_call:
-                    llm_function_call = {
-                        "name": part.function_call.name,
-                        "args": part.function_call.args, # This might be a dict-like object
-                    }
-                    break # Assuming one function call per response for simplicity
-
-        result_details = {
-            "response_text": llm_result_text,
-            "function_call": llm_function_call, # Will be None if no function call
-            "llm_response_id": llm_response.id if hasattr(llm_response, 'id') else str(uuid.uuid4()) # if LlmResponse has an ID
-        }
-        result_json_string = json.dumps(result_details)
-
-        # 4. Generate Vector Embedding
-        #    Combine relevant parts of action and result for embedding
-        text_for_embedding1_action = user_action_text
-        text_for_embedding2_result = llm_result_text
-        if llm_function_call:
-            text_for_embedding2 += f" (Function Call: {llm_function_call['name']})"
-
-        vector_list = generate_combined_embedding(user_id_to_log, text_for_embedding1_action, text_for_embedding2_result)
-        # pgvector expects a string like '[0.1,0.2,0.3,...]'
-        vector_string = "[" + ",".join(map(str, vector_list)) + "]"
-
-        # 5. Call the MCP Toolbox Tool
         tool_params = {
             "user_id": user_id_to_log,
             "action": action_json_string,
             "result": result_json_string,
             "vector_value": vector_string
         }
-
-        print(f"[Callback] Calling MCP tool '{my_tools.log_interaction_after_model}' with params: {tool_params}")
-        # Assuming the tool is within the default toolset loaded or MCP handles it by name
-        # If your tool is part of a specific toolset and `call_tool` needs that info,
-        # you might need to adjust. The `ToolboxClient` API for `call_tool` is key here.
-        # The MCP `call_tool` often takes `tool_name` and `tool_input_dict`.
-        response = my_tools.call_tool(
-            tool_name=os.getenv("LOGGING_TOOL_NAME"),
-            tool_input=tool_params,
-            # toolset_name=TOOLSET_NAME_FOR_LOGGING # Only if required by your client.call_tool
-        )
+        
+        py_tool_name = useraction_insert_mcptool.replace("-", "_")
+        tool_to_call = getattr(my_tools, py_tool_name)
+        
+        # NOTE: If tool_to_call is ALSO async, you would need asyncio.run here too.
+        # Assuming it is a synchronous method on the loaded toolset object.
+        response = tool_to_call(**tool_params)
         print(f"[Callback] MCP tool call response: {response}")
 
+    except AttributeError:
+        py_tool_name = useraction_insert_mcptool.replace("-", "_")
+        print(f"[Callback] Error: Tool '{py_tool_name}' not found in the loaded toolset object.")
     except Exception as e:
-        print(f"[Callback] Error during after_model_callback logging: {e}")
+        print(f"[Callback] Error during logging execution: {e}")
         import traceback
         traceback.print_exc()
 
-#**************************END: Call Back *****************************************    
+
 #**************************END: Call Back *****************************************
 #*************************START: Agents Section**************************************
 # Create a runner for EACH agent
@@ -381,8 +458,7 @@ delete_multiple_ins_loop_agent = LoopAgent(
     #TODO change max_iterations to variable instead of fixed value
     max_iterations=10
     )
-
-
+# Find your root_agent definition
 root_agent = LlmAgent(
     name="finops_optimization_agent",
     model="gemini-2.0-flash",
@@ -390,22 +466,29 @@ root_agent = LlmAgent(
         """Agent is provided with tools to search the Google compute instances running in Google cloud. 
         This is an API list_vm_instances(project_id, zone). 
         When user instructs, delete them using the api call which is provided as an tool delete_vm_instance(project_id, instance_id, zone).
-        Any other question related to finops can be searched using the tool search_tool"""
+        Any other question related to finops can be searched using the tool search_tool.
+        It can also check VM CPU utilization by calling a specialized remote agent using the call_cpu_utilization_agent tool.""" # <-- Updated description
     ),
     instruction=(
         """You are a helpful agent who can answer user questions about cloud finops. 
         When user logs-in greet the user with the tool greeting_agent.
-        Also, when given instructons by user, you can take actions on the cloud. 
-        for eg: list the Google compte engines which are running in cloud. 
+        Also, when given instructions by user, you can take actions on the cloud. 
+        for eg: list the Google compute engines which are running in cloud. 
         Use the tool to delete the compute instances and return the status in a json format.
-        This agent should use the delete_multiple_ins_loop sub agent to delete multiple VMs in a loop
-        """
+        This agent should use the delete_multiple_ins_loop sub agent to delete multiple VMs in a loop.
+        To check CPU usage, use the call_cpu_utilization_agent tool which will delegate the task to a remote expert agent.""" # <-- Updated instruction
     ),
-    tools=[delete_vm_instance, list_vm_instances, search_tool],
+    tools=[
+        delete_vm_instance, 
+        list_vm_instances, 
+        search_tool, 
+        call_cpu_utilization_agent # <-- Add the new tool here
+    ],
     sub_agents=[delete_multiple_ins_loop_agent,greeting_agent],
-    before_model_callback=simple_before_model_modifier, # Assign the function here
-    after_model_callback=log_interaction_after_model # <--- ASSIGN NEW CALLBACK HERE
+    before_model_callback=simple_before_model_modifier,
+    #after_model_callback=log_interaction_after_model
 )
+
 #*************************END: Agents Section**************************************
 #*************************START: Agent Common Section**************************************
 
@@ -417,67 +500,3 @@ Initial_state = {
         My LinkedIn profile can be found at https://www.linkedin.com/in/robinkoikkara/
         """
 }
-
-#Create A New Session
-
-# Example using a local SQLite file:
-db_url = "sqlite:///./my_agent_data.db"
-session_service = DatabaseSessionService(db_url=db_url)
-# Use REASONING_ENGINE_APP_NAME when calling service methods, e.g.:
-# session_service.create_session(app_name=REASONING_ENGINE_APP_NAME, ...)
-
-
-
-capital_runner = Runner(
-    agent=root_agent,
-    app_name=APP_NAME,
-    session_service=session_service
-)
-session = session_service.create_session(
-    app_name=APP_NAME,
-    user_id=USER_ID,
-    session_id=current_session_id_tool_agent,
-    state={"user:login_count": 0, "task_status": "idle"}
-)
-
-print(f"Initial state for session {current_session_id_tool_agent}: {session.state}")
-
-# --- Define State Changes ---
-current_time = time.time()
-state_changes = {
-    "task_status": "active",              # Update session state
-    "user:login_count": session.state.get("user:login_count", 0) + 1, # Update user state
-    "user:last_login_ts": current_time,   # Add user state
-    "temp:validation_needed": True        # Add temporary state (will be discarded)
-}
-
-# --- Create Event with Actions ---
-actions_with_update = EventActions(state_delta=state_changes)
-
-# This event might represent an internal system action, not just an agent response
-system_event = Event(
-    invocation_id="inv_login_update",
-    author="system", # Or 'agent', 'tool' etc.
-    actions=actions_with_update,
-    timestamp=current_time,
-    content=EmptyEventContent()  # <--- ADD THIS LINE
-    # content might be None or represent the action taken
-)
-
-# --- Append the Event (This updates the state) ---
-session_service.append_event(session, system_event)
-print("`append_event` called with explicit state delta.")
-
-# --- Check Updated State ---
-updated_session = session_service.get_session(app_name=APP_NAME,
-                                            user_id=USER_ID, 
-                                            session_id=current_session_id_tool_agent)
-
-if updated_session:
-    print(f"State after event for session {current_session_id_tool_agent}: {updated_session.state}")
-else:
-    print(f"Could not retrieve session with ID: {current_session_id_tool_agent}")
-
-# Expected: {'user:login_count': 1, 'task_status': 'active', 'user:last_login_ts': <timestamp>}
-# Note: 'temp:validation_needed' is NOT present.
-#*************************End: Agent Common Section**************************************

@@ -48,6 +48,7 @@ ENV/
 *.sqlite
 *.db
 *.bak
+*.pem
 
 # IDE / Editor Specific
 .idea/
