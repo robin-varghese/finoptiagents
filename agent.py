@@ -459,34 +459,50 @@ delete_multiple_ins_loop_agent = LoopAgent(
     max_iterations=10
     )
 # Find your root_agent definition
+# In your agent.py file, find the root_agent definition and replace it.
+
 root_agent = LlmAgent(
     name="finops_optimization_agent",
-    model="gemini-2.0-flash",
+    model="gemini-2.0-flash", # Or your preferred model
     description=(
-        """Agent is provided with tools to search the Google compute instances running in Google cloud. 
-        This is an API list_vm_instances(project_id, zone). 
-        When user instructs, delete them using the api call which is provided as an tool delete_vm_instance(project_id, instance_id, zone).
-        Any other question related to finops can be searched using the tool search_tool.
-        It can also check VM CPU utilization by calling a specialized remote agent using the call_cpu_utilization_agent tool.""" # <-- Updated description
+        """Agent for Google Cloud finops tasks. Can list, delete, and check CPU utilization of VMs. 
+        It can also perform multi-step operations like deleting VMs based on their CPU usage."""
     ),
     instruction=(
-        """You are a helpful agent who can answer user questions about cloud finops. 
-        When user logs-in greet the user with the tool greeting_agent.
-        Also, when given instructions by user, you can take actions on the cloud. 
-        for eg: list the Google compute engines which are running in cloud. 
-        Use the tool to delete the compute instances and return the status in a json format.
-        This agent should use the delete_multiple_ins_loop sub agent to delete multiple VMs in a loop.
-        To check CPU usage, use the call_cpu_utilization_agent tool which will delegate the task to a remote expert agent.""" # <-- Updated instruction
+        """You are an advanced Google Cloud finops assistant. You can answer questions and execute tasks by calling tools.
+
+        **Core Capabilities:**
+        - Greet the user with the `greeting_agent`.
+        - List running VMs using the `list_vm_instances` tool.
+        - Delete a single VM using the `delete_vm_instance` tool.
+        - Delete multiple VMs using the `delete_multiple_ins_loop_agent`.
+        - Check CPU usage for all VMs in a zone using the `call_cpu_utilization_agent` tool.
+        - Answer general finops questions using the `search_tool`.
+
+        **IMPORTANT REASONING PROCESS for Deletion by CPU Utilization:**
+        When a user asks you to delete VMs based on a condition like "CPU utilization below 30%", you MUST follow this multi-step process:
+
+        1.  **Step 1: Gather Data.** You DO NOT have a tool to directly filter VMs by CPU. Your first action MUST be to call the `call_cpu_utilization_agent` tool with the correct `project_id` and `zone` to get the list of all VMs and their current CPU usage.
+
+        2.  **Step 2: Analyze and Plan.** After you get the text output from `call_cpu_utilization_agent`, you must carefully read it. Parse the text to identify the `Instance ID` of every VM that meets the user's criteria (e.g., CPU percentage is less than 30). Create a list of these target Instance IDs. If no VMs meet the criteria, inform the user and stop.
+
+        3.  **Step 3: Execute Deletion.** Based on the list of Instance IDs you created in Step 2:
+            - If your list contains EXACTLY ONE `Instance ID`, your next action is to call the `delete_vm_instance` tool for that single instance.
+            - If your list contains MORE THAN ONE `Instance ID`, your next action is to call the `delete_multiple_ins_loop_agent` sub-agent. When calling the loop agent, you must provide the necessary information for all target VMs.
+
+        4.  **Step 4: Report to User.** After the deletion tools have finished, provide a clear summary of which VMs were deleted to the user.
+        """
     ),
     tools=[
         delete_vm_instance, 
         list_vm_instances, 
         search_tool, 
-        call_cpu_utilization_agent # <-- Add the new tool here
+        call_cpu_utilization_agent
     ],
-    sub_agents=[delete_multiple_ins_loop_agent,greeting_agent],
+    sub_agents=[delete_multiple_ins_loop_agent, greeting_agent],
+    # Your callbacks remain the same
     before_model_callback=simple_before_model_modifier,
-    #after_model_callback=log_interaction_after_model
+    after_model_callback=log_interaction_after_model
 )
 
 #*************************END: Agents Section**************************************
